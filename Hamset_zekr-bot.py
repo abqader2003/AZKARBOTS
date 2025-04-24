@@ -1,249 +1,304 @@
-import os
 import json
-import time
-import threading
+import os
+import asyncio
+import nest_asyncio
 import random
-import telebot
+from telegram import ReplyKeyboardMarkup, Update, KeyboardButton
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
-from telebot import types
 
-# تهيئة البوت باستخدام التوكن الخاص بك
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-bot = telebot.TeleBot(BOT_TOKEN)
+# تطبيق nest_asyncio لتجنب مشاكل التزامن في بيئات مثل Pella
+nest_asyncio.apply()
 
-# قائمة الأذكار الروحانية
-SPIRITUAL_REMINDERS = [
+# توكن البوت - يمكنك تغييره
+TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+
+# قائمة الأذكار
+azkar = [
     "سبحان الله وبحمده، سبحان الله العظيم",
     "لا إله إلا الله وحده لا شريك له، له الملك وله الحمد وهو على كل شيء قدير",
     "اللهم صل على محمد وعلى آل محمد كما صليت على إبراهيم وعلى آل إبراهيم إنك حميد مجيد",
     "أستغفر الله العظيم الذي لا إله إلا هو الحي القيوم وأتوب إليه",
-    "سبحان الله، والحمد لله، ولا إله إلا الله، والله أكبر",
     "لا حول ولا قوة إلا بالله العلي العظيم",
+    "سبحان الله، والحمد لله، ولا إله إلا الله، والله أكبر",
     "اللهم إني أسألك العفو والعافية في الدنيا والآخرة",
-    "حسبي الله لا إله إلا هو عليه توكلت وهو رب العرش العظيم",
+    "رَبِّ اشْرَحْ لِي صَدْرِي وَيَسِّرْ لِي أَمْرِي",
     "اللهم أنت ربي لا إله إلا أنت، خلقتني وأنا عبدك، وأنا على عهدك ووعدك ما استطعت",
-    "رب اغفر لي وتب علي إنك أنت التواب الرحيم"
+    "حسبي الله لا إله إلا هو عليه توكلت وهو رب العرش العظيم"
 ]
 
-# الفترات الزمنية المتاحة (بالثواني)
-TIME_INTERVALS = {
-    "15min": 15 * 60,
-    "30min": 30 * 60,
-    "60min": 60 * 60
-}
+# أسماء ملفات المشتركين
+QUARTER_HOUR_FILE = 'quarter_hour_subscribers.json'
+HALF_HOUR_FILE = 'half_hour_subscribers.json'
+HOUR_FILE = 'hour_subscribers.json'
 
-# مسار ملف تخزين المشتركين
-SUBSCRIBERS_FILE = "subscribers.json"
+# إنشاء المجلدات اللازمة
+def ensure_directories():
+    if not os.path.exists("data"):
+        os.makedirs("data")
+    if not os.path.exists("data/subscribers"):
+        os.makedirs("data/subscribers")
 
-# هيكل بيانات المشتركين
-subscribers = {}
+# قراءة المشتركين من ملف
+def load_subscribers(file_name):
+    file_path = f'data/subscribers/{file_name}'
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return []
 
-# تحميل المشتركين من الملف
-def load_subscribers():
-    global subscribers
-    if os.path.exists(SUBSCRIBERS_FILE):
-        try:
-            with open(SUBSCRIBERS_FILE, 'r', encoding='utf-8') as file:
-                subscribers = json.load(file)
-        except Exception as e:
-            print(f"خطأ في تحميل ملف المشتركين: {e}")
-            subscribers = {}
-    else:
-        subscribers = {}
-
-# حفظ المشتركين في الملف
-def save_subscribers():
-    with open(SUBSCRIBERS_FILE, 'w', encoding='utf-8') as file:
+# حفظ المشتركين في ملف
+def save_subscribers(subscribers, file_name):
+    file_path = f'data/subscribers/{file_name}'
+    with open(file_path, 'w', encoding='utf-8') as file:
         json.dump(subscribers, file, ensure_ascii=False, indent=4)
 
-# إضافة مشترك جديد
-def add_subscriber(user_id, interval):
-    user_id = str(user_id)  # تحويل المعرف إلى نص للتخزين في JSON
-    subscribers[user_id] = {
-        "interval": interval,
-        "last_reminder_time": int(time.time())
-    }
-    save_subscribers()
-
-# حذف مشترك
-def remove_subscriber(user_id):
-    user_id = str(user_id)
-    if user_id in subscribers:
-        del subscribers[user_id]
-        save_subscribers()
-        return True
-    return False
-
-# التحقق من وجود مشترك
-def is_subscribed(user_id):
-    return str(user_id) in subscribers
-
-# تغيير الفترة الزمنية للمشترك
-def change_interval(user_id, interval):
-    user_id = str(user_id)
-    if user_id in subscribers:
-        subscribers[user_id]["interval"] = interval
-        save_subscribers()
-        return True
-    return False
-
-# الحصول على ذكر عشوائي
-def get_random_reminder():
-    return random.choice(SPIRITUAL_REMINDERS)
-
-# رسالة الترحيب وإظهار القائمة الرئيسية
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn1 = types.KeyboardButton("الاشتراك في الأذكار ✨")
-    btn2 = types.KeyboardButton("إلغاء الاشتراك ❌")
-    btn3 = types.KeyboardButton("تغيير الفترة الزمنية ⏱")
-    btn4 = types.KeyboardButton("ذكر عشوائي 🌟")
-    markup.add(btn1, btn2, btn3, btn4)
-    
-    bot.send_message(
-        message.chat.id,
-        "أهلاً بك في بوت الأذكار الروحانية 🕌\n\n"
-        "يمكنك الاشتراك للحصول على أذكار دورية بالفترة التي تناسبك.\n"
-        "اختر من القائمة أدناه:",
-        reply_markup=markup
-    )
-
-# معالجة طلب الاشتراك
-@bot.message_handler(func=lambda message: message.text == "الاشتراك في الأذكار ✨")
-def subscription_handler(message):
-    if is_subscribed(message.chat.id):
-        bot.send_message(message.chat.id, "أنت مشترك بالفعل في خدمة الأذكار. يمكنك تغيير الفترة الزمنية إذا أردت.")
+# إرسال ذكر عشوائي للمشتركين
+async def send_scheduled_zikr(app, file_name, time_type):
+    subscribers = load_subscribers(file_name)
+    if not subscribers:
+        print(f"لا يوجد مشتركين في {time_type}")
         return
     
-    markup = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True)
-    btn1 = types.KeyboardButton("كل ربع ساعة")
-    btn2 = types.KeyboardButton("كل نصف ساعة")
-    btn3 = types.KeyboardButton("كل ساعة")
-    btn4 = types.KeyboardButton("العودة للقائمة الرئيسية")
-    markup.add(btn1, btn2, btn3, btn4)
+    random_zikr = random.choice(azkar)
+    current_time = datetime.now().strftime("%H:%M")
     
-    bot.send_message(
-        message.chat.id,
-        "اختر الفترة الزمنية المناسبة لاستلام الأذكار:",
-        reply_markup=markup
+    print(f"جاري إرسال ذكر {time_type} في الساعة {current_time} إلى {len(subscribers)} مشترك...")
+    
+    for user_id in subscribers:
+        try:
+            await app.bot.send_message(
+                chat_id=user_id,
+                text=f"🕌 *ذكر الساعة {current_time}*\n\n{random_zikr}",
+                parse_mode='Markdown'
+            )
+            print(f"تم إرسال الذكر إلى المستخدم {user_id}")
+        except Exception as e:
+            print(f"خطأ في إرسال الذكر للمستخدم {user_id}: {e}")
+
+# إنشاء لوحة المفاتيح الرئيسية
+def build_main_keyboard():
+    keyboard = [
+        [KeyboardButton("🕒 ذكر الربع ساعة")],
+        [KeyboardButton("🕒 ذكر النصف ساعة")],
+        [KeyboardButton("🕒 ذكر الساعة")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# إنشاء لوحة مفاتيح فرعية للاشتراك
+def build_subscription_keyboard(subscription_type):
+    keyboard = [
+        [KeyboardButton("✅ اشتراك")],
+        [KeyboardButton("❌ إلغاء الاشتراك")],
+        [KeyboardButton("🔙 رجوع للقائمة")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# معالج أمر البدء
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_chat.id
+    first_name = update.effective_user.first_name
+    
+    await update.message.reply_text(
+        f"السلام عليكم {first_name}! 🌙\n\n"
+        "مرحبًا بك في بوت الأذكار الروحاني.\n"
+        "اختر من القائمة أدناه طريقة استلام الأذكار.",
+        reply_markup=build_main_keyboard()
     )
 
-# معالجة اختيار الفترة الزمنية
-@bot.message_handler(func=lambda message: message.text in ["كل ربع ساعة", "كل نصف ساعة", "كل ساعة"])
-def interval_handler(message):
-    interval_map = {
-        "كل ربع ساعة": "15min",
-        "كل نصف ساعة": "30min",
-        "كل ساعة": "60min"
-    }
-    
-    interval = interval_map[message.text]
-    add_subscriber(message.chat.id, interval)
-    
-    # إعادة القائمة الرئيسية
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn1 = types.KeyboardButton("الاشتراك في الأذكار ✨")
-    btn2 = types.KeyboardButton("إلغاء الاشتراك ❌")
-    btn3 = types.KeyboardButton("تغيير الفترة الزمنية ⏱")
-    btn4 = types.KeyboardButton("ذكر عشوائي 🌟")
-    markup.add(btn1, btn2, btn3, btn4)
-    
-    bot.send_message(
-        message.chat.id, 
-        f"تم اشتراكك بنجاح! ستصلك الأذكار {message.text}",
-        reply_markup=markup
-    )
-
-# معالجة طلب إلغاء الاشتراك
-@bot.message_handler(func=lambda message: message.text == "إلغاء الاشتراك ❌")
-def unsubscribe_handler(message):
-    if not is_subscribed(message.chat.id):
-        bot.send_message(message.chat.id, "أنت غير مشترك في خدمة الأذكار حاليًا.")
+# معالج الرسائل
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # التحقق من وجود الرسالة
+    if not update.message or not update.message.text:
         return
     
-    if remove_subscriber(message.chat.id):
-        bot.send_message(message.chat.id, "تم إلغاء اشتراكك بنجاح.")
+    user_id = update.effective_chat.id
+    text = update.message.text
+    
+    # معالجة اختيارات القائمة الرئيسية
+    if text == "🕒 ذكر الربع ساعة":
+        context.user_data["current_subscription"] = "quarter"
+        await update.message.reply_text(
+            "*ذكر كل ربع ساعة*\n\n"
+            "هذه الخدمة تقوم بإرسال ذكر روحاني عشوائي كل ربع ساعة.\n"
+            "الأوقات: 6:00، 6:15، 6:30، 6:45، 7:00، وهكذا...\n\n"
+            "هل ترغب في الاشتراك؟",
+            reply_markup=build_subscription_keyboard("quarter"),
+            parse_mode='Markdown'
+        )
+    
+    elif text == "🕒 ذكر النصف ساعة":
+        context.user_data["current_subscription"] = "half"
+        await update.message.reply_text(
+            "*ذكر كل نصف ساعة*\n\n"
+            "هذه الخدمة تقوم بإرسال ذكر روحاني عشوائي كل نصف ساعة.\n"
+            "الأوقات: 6:00، 6:30، 7:00، 7:30، وهكذا...\n\n"
+            "هل ترغب في الاشتراك؟",
+            reply_markup=build_subscription_keyboard("half"),
+            parse_mode='Markdown'
+        )
+    
+    elif text == "🕒 ذكر الساعة":
+        context.user_data["current_subscription"] = "hour"
+        await update.message.reply_text(
+            "*ذكر كل ساعة*\n\n"
+            "هذه الخدمة تقوم بإرسال ذكر روحاني عشوائي كل ساعة.\n"
+            "الأوقات: 6:00، 7:00، 8:00، وهكذا...\n\n"
+            "هل ترغب في الاشتراك؟",
+            reply_markup=build_subscription_keyboard("hour"),
+            parse_mode='Markdown'
+        )
+    
+    # معالجة عمليات الاشتراك
+    elif text == "✅ اشتراك" and "current_subscription" in context.user_data:
+        subscription_type = context.user_data["current_subscription"]
+        
+        if subscription_type == "quarter":
+            file_name = QUARTER_HOUR_FILE
+            time_desc = "ربع ساعة"
+        elif subscription_type == "half":
+            file_name = HALF_HOUR_FILE
+            time_desc = "نصف ساعة"
+        else:  # hour
+            file_name = HOUR_FILE
+            time_desc = "ساعة"
+        
+        # قراءة المشتركين وإضافة المستخدم الحالي
+        subscribers = load_subscribers(file_name)
+        user_id_str = str(user_id)
+        
+        if user_id_str in subscribers:
+            await update.message.reply_text(
+                f"أنت مشترك بالفعل في خدمة الأذكار كل {time_desc}.",
+                reply_markup=build_subscription_keyboard(subscription_type)
+            )
+        else:
+            subscribers.append(user_id_str)
+            save_subscribers(subscribers, file_name)
+            await update.message.reply_text(
+                f"✅ تم اشتراكك بنجاح في خدمة الأذكار كل {time_desc}.\n\n"
+                "ستصلك الأذكار في الأوقات المحددة إن شاء الله.",
+                reply_markup=build_subscription_keyboard(subscription_type)
+            )
+    
+    # معالجة عمليات إلغاء الاشتراك
+    elif text == "❌ إلغاء الاشتراك" and "current_subscription" in context.user_data:
+        subscription_type = context.user_data["current_subscription"]
+        
+        if subscription_type == "quarter":
+            file_name = QUARTER_HOUR_FILE
+            time_desc = "ربع ساعة"
+        elif subscription_type == "half":
+            file_name = HALF_HOUR_FILE
+            time_desc = "نصف ساعة"
+        else:  # hour
+            file_name = HOUR_FILE
+            time_desc = "ساعة"
+        
+        # قراءة المشتركين وإزالة المستخدم الحالي
+        subscribers = load_subscribers(file_name)
+        user_id_str = str(user_id)
+        
+        if user_id_str in subscribers:
+            subscribers.remove(user_id_str)
+            save_subscribers(subscribers, file_name)
+            await update.message.reply_text(
+                f"❌ تم إلغاء اشتراكك في خدمة الأذكار كل {time_desc}.",
+                reply_markup=build_subscription_keyboard(subscription_type)
+            )
+        else:
+            await update.message.reply_text(
+                f"أنت غير مشترك في خدمة الأذكار كل {time_desc}.",
+                reply_markup=build_subscription_keyboard(subscription_type)
+            )
+    
+    # العودة للقائمة الرئيسية
+    elif text == "🔙 رجوع للقائمة":
+        if "current_subscription" in context.user_data:
+            del context.user_data["current_subscription"]
+        await update.message.reply_text(
+            "القائمة الرئيسية",
+            reply_markup=build_main_keyboard()
+        )
+    
+    # رسالة افتراضية لأي مدخلات أخرى
     else:
-        bot.send_message(message.chat.id, "حدث خطأ أثناء إلغاء الاشتراك. الرجاء المحاولة مرة أخرى.")
+        await update.message.reply_text(
+            "🤔 عذرًا، لم أفهم الأمر.\n"
+            "يرجى اختيار إحدى الخيارات من القائمة.",
+            reply_markup=build_main_keyboard()
+        )
 
-# معالجة طلب تغيير الفترة الزمنية
-@bot.message_handler(func=lambda message: message.text == "تغيير الفترة الزمنية ⏱")
-def change_interval_handler(message):
-    if not is_subscribed(message.chat.id):
-        bot.send_message(message.chat.id, "أنت غير مشترك في خدمة الأذكار حاليًا. يرجى الاشتراك أولاً.")
-        return
+# جدولة الرسائل
+def schedule_messages(app, scheduler):
+    # جدولة الأذكار كل ربع ساعة
+    for minute in ['00', '15', '30', '45']:
+        scheduler.add_job(
+            send_scheduled_zikr,
+            trigger='cron',
+            hour='*',
+            minute=minute,
+            id=f"quarter_hour_{minute}",
+            replace_existing=True,
+            args=[app, QUARTER_HOUR_FILE, "الربع ساعة"]
+        )
+        print(f"تمت جدولة ذكر الربع ساعة في الدقيقة {minute}")
     
-    markup = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True)
-    btn1 = types.KeyboardButton("كل ربع ساعة")
-    btn2 = types.KeyboardButton("كل نصف ساعة")
-    btn3 = types.KeyboardButton("كل ساعة")
-    btn4 = types.KeyboardButton("العودة للقائمة الرئيسية")
-    markup.add(btn1, btn2, btn3, btn4)
+    # جدولة الأذكار كل نصف ساعة
+    for minute in ['00', '30']:
+        scheduler.add_job(
+            send_scheduled_zikr,
+            trigger='cron',
+            hour='*',
+            minute=minute,
+            id=f"half_hour_{minute}",
+            replace_existing=True,
+            args=[app, HALF_HOUR_FILE, "النصف ساعة"]
+        )
+        print(f"تمت جدولة ذكر النصف ساعة في الدقيقة {minute}")
     
-    bot.send_message(
-        message.chat.id,
-        "اختر الفترة الزمنية الجديدة لاستلام الأذكار:",
-        reply_markup=markup
+    # جدولة الأذكار كل ساعة
+    scheduler.add_job(
+        send_scheduled_zikr,
+        trigger='cron',
+        hour='*',
+        minute='00',
+        id="hour_00",
+        replace_existing=True,
+        args=[app, HOUR_FILE, "الساعة"]
     )
+    print("تمت جدولة ذكر الساعة")
 
-# معالجة طلب ذكر عشوائي
-@bot.message_handler(func=lambda message: message.text == "ذكر عشوائي 🌟")
-def random_reminder_handler(message):
-    reminder = get_random_reminder()
-    bot.send_message(message.chat.id, f"✨ {reminder} ✨")
+# معالج الأخطاء
+async def error_handler(update, context):
+    print(f"حدث خطأ: {context.error}")
 
-# معالجة طلب العودة للقائمة الرئيسية
-@bot.message_handler(func=lambda message: message.text == "العودة للقائمة الرئيسية")
-def back_to_main_menu(message):
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn1 = types.KeyboardButton("الاشتراك في الأذكار ✨")
-    btn2 = types.KeyboardButton("إلغاء الاشتراك ❌")
-    btn3 = types.KeyboardButton("تغيير الفترة الزمنية ⏱")
-    btn4 = types.KeyboardButton("ذكر عشوائي 🌟")
-    markup.add(btn1, btn2, btn3, btn4)
+# الدالة الرئيسية
+async def main():
+    # التأكد من وجود المجلدات اللازمة
+    ensure_directories()
     
-    bot.send_message(
-        message.chat.id,
-        "القائمة الرئيسية:",
-        reply_markup=markup
-    )
+    # إنشاء تطبيق البوت
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    # إضافة معالج الأخطاء
+    app.add_error_handler(error_handler)
+    
+    # إنشاء المجدول
+    scheduler = AsyncIOScheduler()
+    
+    # إضافة معالجات الأوامر والرسائل
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # جدولة الرسائل
+    schedule_messages(app, scheduler)
+    scheduler.start()
+    
+    print("🚀 البوت قيد التشغيل...")
+    await app.run_polling()
 
-# وظيفة إرسال الأذكار الدورية للمشتركين
-def send_reminders():
-    while True:
-        current_time = int(time.time())
-        
-        for user_id, user_data in list(subscribers.items()):
-            interval_seconds = TIME_INTERVALS[user_data["interval"]]
-            last_reminder_time = user_data["last_reminder_time"]
-            
-            if current_time - last_reminder_time >= interval_seconds:
-                try:
-                    reminder = get_random_reminder()
-                    bot.send_message(int(user_id), f"🕌 ذكر روحاني لك: \n\n✨ {reminder} ✨")
-                    subscribers[user_id]["last_reminder_time"] = current_time
-                    save_subscribers()
-                except Exception as e:
-                    print(f"خطأ في إرسال الذكر للمستخدم {user_id}: {e}")
-        
-        # تقليل استهلاك المعالج
-        time.sleep(10)
-
-# تحميل المشتركين عند بدء البوت
-load_subscribers()
-
-# بدء خيط لإرسال الأذكار
-reminder_thread = threading.Thread(target=send_reminders)
-reminder_thread.daemon = True
-reminder_thread.start()
-
-# معلومات إضافية للمستخدم
-print("تم تشغيل بوت الأذكار الروحانية!")
-print("اضغط على Ctrl+C لإيقاف البوت")
-
-# تشغيل البوت
-try:
-    bot.polling(none_stop=True)
-except Exception as e:
-    print(f"حدث خطأ في تشغيل البوت: {e}")
+if __name__ == "__main__":
+    asyncio.run(main())
